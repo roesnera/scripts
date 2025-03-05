@@ -1,0 +1,68 @@
+#!/bin/bash
+
+update=false
+
+usage() {
+  echo "Usage: $0 [-U to update]"
+  exit 1
+}
+
+while getopts "U" opt; do
+  case $opt in
+    U)
+      update=true
+      ;;
+  esac
+done
+
+# Check if package.json exists in the current directory
+if [[ ! -f "package.json" ]]; then
+  echo "package.json not found in the current directory."
+  exit 1
+fi
+
+# Function to compare versions
+compare_versions() {
+  local installed_version=$1
+  local latest_version=$2
+  if [[ "$installed_version" == "$latest_version" ]]; then
+    echo "Up to date: $installed_version"
+  else
+    if [[ $update == true ]]; then
+      echo "Updating $3 to latest"
+      npm i "$3"@latest > /dev/null 2>&1 && echo "Update succeeded!" || echo "Update failed :("
+    else
+      echo "Outdated: installed=$installed_version, latest=$latest_version"
+    fi
+  fi
+}
+
+# Read dependencies and devDependencies from package.json
+dependencies=$(jq -r '.dependencies // {} | to_entries[] | "\(.key)@\(.value)"' package.json)
+dev_dependencies=$(jq -r '.devDependencies // {} | to_entries[] | "\(.key)@\(.value)"' package.json)
+
+# Combine dependencies and devDependencies
+all_dependencies=$(echo -e "$dependencies\n$dev_dependencies")
+
+# Loop through each dependency
+echo "Checking dependencies..."
+for dep in $all_dependencies; do
+  # Extract package name and installed version
+  if [[ "$dep" == @* ]]; then
+    package_name=$(echo "$dep" | cut -d '@' -f 1-2 --output-delimiter='@')
+    installed_version=$(echo "$dep" | cut -d '@' -f 3 | sed 's/[\^~]//g') # Remove ^ or ~ from version
+  else
+    package_name=$(echo "$dep" | cut -d '@' -f 1)
+    installed_version=$(echo "$dep" | cut -d '@' -f 2 | sed 's/[\^~]//g') # Remove ^ or ~ from version
+  fi
+
+  # Get the latest version from npm
+  latest_version=$(npm show "$package_name" version 2>/dev/null)
+
+  if [[ -z "$latest_version" ]]; then
+    echo "Error: Could not fetch version for $package_name"
+  else
+    echo -n "$package_name: "
+    compare_versions "$installed_version" "$latest_version" "$package_name"
+  fi
+done
