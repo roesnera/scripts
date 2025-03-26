@@ -1,0 +1,68 @@
+#!/bin/bash
+
+command -v fd >/dev/null 2>1 || {
+  echo "Please install 'fdfinder' and make it available as 'fd'"
+  exit 1
+}
+
+command -v rg >/dev/null 2>1 || {
+  echo "Please install 'rg'"
+  exit 1
+}
+
+usage() {
+  echo "Usage: $0 [main/community/dashboard] [start/stop]"
+  exit 1
+}
+
+if [[ $# -ne 2 ]]; then
+  echo "Missing required arguments!"
+  usage
+fi
+
+cwd=$(pwd)
+frontend=""
+backend=""
+db=false
+
+echo "$cwd"
+
+if [[ $1 == "main" ]]; then
+  frontend="hinge-main-frontend"
+  backend="hinge-main-backend"
+elif [[ $1 == "community" ]]; then
+  frontend="hinge-community-dashboard-frontend"
+  backend="hinge-community-dashboard-backend"
+  db=true
+elif [[ $1 == "dashboard" ]]; then
+  frontend="hinge-dashboard-frontend"
+  backend="hinge-dashboard-backend"
+fi
+
+fe_path=$(fd --type d -1 $frontend ~)
+be_path=$(fd --type d -1 $backend ~)
+
+fe_start_package_line=$(cd $fe_path && cat package.json | rg start && cd $cwd)
+be_start_package_line=$(cd $be_path && cat package.json | rg start && cd $cwd)
+
+get_script_val() {
+  if [[ $1 == "start" ]]; then
+    echo "npm run $(echo $fe_start_package_line | awk --field-separator=\" '{ print $2 }')"
+    echo "npm run $(echo $be_start_package_line | awk --field-separator=\" '{ print $2 }')"
+  else
+    echo $(echo $fe_start_package_line | awk --field-separator=\" '{ print $4 }')
+  fi
+}
+cmds=$(get_script_val $2)
+echo $cmds
+
+# if [[ $2 == "start" ]]; then
+#   fe_cmd="npm run $(cd $fe_path && cat package.json | rg start | awk --field-separator=\" '{ print $2 }'  && cd $cwd)"
+#   be_cmd="npm run $(cd $be_path && cat package.json | rg start | awk --field-separator=\" '{ print $2 }'  && cd $cwd)"
+# else
+#   fe_cmd="pkill -f $()"
+# fi
+
+# echo "$fe_cmd"
+# echo "$be_start_cmd"
+exit 0

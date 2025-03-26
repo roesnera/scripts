@@ -1,0 +1,378 @@
+#!/usr/bin/env bash
+#
+# commandline asciii kanban board for minimalist productivity bash hackers (csv-based)
+#
+# Usage:
+# 
+#   kanban init                             # initialize kanban in current directory
+#   kanban add                              # add item interactive (adviced) 
+#   kanban show [dir with .kanban]          # show global [or nested] ascii kanbanboard
+#   kanban <id>                             # edit or update item 
+#   kanban <id> <status>                    # update status of todo id (uses $EDITOR as preferred editor)
+#   kanban <status> .....                   # list only todo items with this status(es)
+#   kanban list                             # list all todos (heavy)
+#   kanban tags                             # list all submitted tags
+#   kanban add <status> <tag> <description> # add item (use quoted strings for args)  
+#   kanban stats status [tag]
+#   kanban stats tag 
+#   kanban stats history 
+#   kanban csv                              # edit raw csv
+# 
+#   NOTE #1: statuses can be managed in ~/.kanban/.kanban.conf
+#   NOTE #2: the database csv can be found in ~/.kanban/.kanban.csv
+# 
+# Examples:
+# 
+#   kanban add TODO projectX "do foo"
+#   kanban TODO DOING HOLD                 
+#   kanban stats status projectX
+#   kanban stats tag projectX 
+#   # notekeeping by entering a filename as description:
+#   echo hello > note.txt && kanban add DOING note.txt
+#   # store in github repo
+#   git clone https://../foo.git && cd foo.git && kanban init && git add .kanban
+# 
+# Environment:
+# 
+#   X=120 kanban ....         # set max line-width to 120
+#   NOCOLOR=1 kanban ....     # disable colors
+#   PLAIN=1 kanban ...        # plaintext, disable utf8 chars
+# 
+# Tips:
+# 
+#   * <current_dir>/.kanban or ~/.kanban dir is checked for configuration / data
+#   * put .kanban directories in project-dirs
+#   * entering an existing text-filename as description enables note-keeping
+# 
+# Copyright (C) 2015, Leon van Kammen / Coder of Salvation 
+#  
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU Affero General Public License as
+#  published by the Free Software Foundation, either version 3 of the
+#  License, or (at your option) any later version.
+#  
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU Affero General Public License for more details.
+#  
+#  You should have received a copy of the GNU Affero General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+deps="tput column pr gawk"
+for dep in $deps; do which $dep &>/dev/null || { echo "$dep-cmd not installed..aborting (maybe install coreutils util-linux pkgs?)"; exit 1; }; done
+BOX=(┌ ─ ┐ └ ┘ │ ┤ ┴ ┬ ├ ┼)
+BAR=(▁ ▂ ▃ ▄ ▅ ▆ ▆ ▇ ▇ '█' '█')
+COL0="\033[0m"
+COL1="\033[37;1m"
+COL2="\033[91;1m"
+COL3="\033[91;5m"
+TMP=$(mktemp -t kanban.XXXXXXXX)
+[[ ! -n $TERM ]] && TERM=vt100
+locale | grep -q "UTF-8" && UTF8=1
+[[ -n $PLAIN ]] && unset UTF8
+[[ ! -n $X   ]] && X=$(tput cols)   # get size of terminal window
+[[ ! -n $Y   ]] && Y=$(tput lines)  # 
+SMALLSCREEN=('SCHEDULED' 'HOLD' 'DOING')  # uncomment to get simplified kanban board
+[[ ! -n $XSMALL ]] && XSMALL=119
+FILE_CONF=".kanban/.kanban.conf"
+FILE_CSV=".kanban/.kanban.csv"
+[[ ! -n "$EDITOR" ]] && {
+  which nano   &>/dev/null && EDITOR=nano
+  which pico   &>/dev/null && EDITOR=pico
+  printf "${COL2}warning:${COL0} EDITOR env-variable not set: add it ('export EDITOR=vim' e.g.) to ~/.profile e.g.)\n"
+}
+
+# migration: move config files of old kanban versions to .kanban
+moveconfig(){ 
+  mkdir "$1/.kanban"
+  echo "[!] old config files detected..moving to .kanban-folder"
+  mv "$1/.kanban".* "$1/.kanban/."
+  sleep 3s
+  clear
+}
+[[ -f ~/.kanban.csv ]] && moveconfig ~
+[[ -f .kanban.csv   ]] && moveconfig "$(pwd)"
+
+
+config_example="# kanban config file
+statuses=('TODO' 'HOLD' 'DOING' 'DONE' 'NOTES' 'BACKLOG') 
+
+XSMALL=119                           # show small kanban for terminalwidth < 119 chars
+SMALLSCREEN=('DOING' 'TODO' 'HOLD')  # define simplified kanban board statuses
+
+# maximum amount of todos within status (triggers warning when exceeds)
+declare -a maximum_todo
+maximum_todo[HOLD]=10
+maximum_todo[DOING]=5
+"
+
+# usage: fb put <x> <y> <string>
+put() { printf "\x1B["$2";"$1"f$3" "$4"; }
+
+strtoline() {
+    str="$1"
+    char="$2"
+    i=0
+    len=${#str}
+    
+    while [ "$i" -lt "$len" ]; do
+        printf "%s" "$char"
+        i=$((i + 1))
+    done
+}
+
+draw_line() {
+    i=0
+    while [ "$i" -lt "$1" ]; do
+        printf "-"
+        i=$((i + 1))
+    done
+}
+
+# usage: fb box <x> <y> <width> <height>
+draw_topline(){
+  w=$((X-2)); 
+  printf ${BOX[0]}; draw_line $w; printf "${BOX[2]}\n"
+}
+
+createconfig(){
+  dir="$1"
+  [[ ! -n $1 ]] && {
+    dir=~
+    [[ -f ~/$FILE_CONF ]] && { 
+      read -p "overwrite current config? (y/n)" overwrite; 
+      [[ ! "$overwrite" == "y" ]] && echo "aborted" && exit 1;
+    }
+  }
+  [[ ! -d "$dir/.kanban" ]] && mkdir "$dir/.kanban"
+  echo "$config_example" > "$dir/$FILE_CONF"
+  touch "$dir/$FILE_CSV" 
+}
+
+init(){ createconfig "$(pwd)"; }
+
+tags(){
+  cat "$KANBANFILE" | awk -F',' '{ print $2 }' | sed 's/,.*//g;s/"//g' | tail -n+1 | sort | uniq | tr '\n' ' '
+  echo
+}
+
+get_statuses(){
+  echo ${statuses[@]}
+}
+
+add_interactive(){
+  echo "enter description:"
+  read -p "> " description 
+  echo "enter one of statuses: ${statuses[@]}"
+  read -p "> " status
+  echo "enter one of tags: $(tags)"
+  read -p "> " tag
+  add "$status" "$tag" "$description"
+}
+
+add(){
+  [[ ! -n $1 ]] && { add_interactive "$@"; return 0; }
+  [[ ! "${statuses[*]}" =~ "$1" ]] && echo "invalid status $1 (possible: ${statuses[*]})" && exit 1 
+  status="$1"
+  csvline='"'$1'","'$2'"'; shift;shift;
+  csvline="$csvline,\"$*\",\"${status:0:1}\",\"$(get_current_date)\"\""
+  echo "${csvline:0:$((${#csvline}-1))}" >> "$KANBANFILE" 
+}
+
+evaluate(){
+  IFS=''; cat - | sed 's/\\/\\\\\\\\/g' | while read -r line; do 
+    [[ "$line" =~ '$' ]] && line="$(eval "echo \"$( echo "$line" | sed 's/"/\\"/g')\"")"; 
+    echo "$line"
+  done
+}
+
+stats(){
+  [[ ! -n $1 ]] && exit 1
+  create_index
+  field=$1; shift; tags="$*"
+  greppattern="(${tags// /\|})"
+  [[ "$field" == "status" ]]  && field=2
+  [[ "$field" == "tag" ]]     && field=3
+  [[ "$field" == "history" ]] && field=5
+  [[ -n $2 ]] && WIDTH=$2   || WIDTH=20; 
+  [[ -n $3 ]] && PADDING=$3 || PADDING=20;
+  {
+    if [[ -n $PADDING ]]; then 
+      cat $TMP.index | grep -E "$greppattern" | gawk -vFS='^"|","|"$|",|,"|,' '{h[$'"$field"']++}END{for(i in h){print h[i],i|"sort -rn|head -20"}}' |gawk '!max{max=$1;}{r="";i=s='$WIDTH'*$1/max;while(i-->0)r=r"'"${BAR[5]}"'";printf "%'$PADDING's %5d %s %s",$2,$1,r,"\n";}'
+    else                                                                                                                                                   
+      cat $TMP.index | grep -E "$greppattern" | gawk -vFS='^"|","|"$|",|,"|,' '{h[$'"$field"']++}END{for(i in h){print h[i],i|"sort -rn|head -20"}}' |gawk '!max{max=$1;}{r="";i=s='$WIDTH'*$1/max;while(i-->0)r=r"'"${BAR[5]}"'";printf "%s %s: %5d\n",r,$2,$1;}' | tr -s " " 
+    fi 
+  } | grep -v 'tag\|status\|history\|-[ ]\+1' | grep -v '^[ ]\+1' # remove header rows
+}
+
+_init(){                          
+  trap "[[ -z \$NOCOLOR ]] && tput sgr0" 0 1 5    # reset terminal colors to normal
+  (( $X > $XSMALL )) && unset SMALLSCREEN
+  [[ -n $NOCOLOR ]] && { COL1="";COL0="";COL2=""; COL3=""; }
+}
+
+list(){
+  tags="$*"
+  greppattern="(${tags// /\|})"
+  create_index
+  echo -e "$COL1"
+  cat $TMP.index | grep -E "$greppattern" | sort -k2 -t, | HEADER="id,status,tag,description,history,start,touched\n-,-,-,-,-\n" printcsv 6 | cut -c 1-$X | colorize 3
+  rm $TMP.*
+}
+
+create_index(){
+  rm $TMP.index &>/dev/null
+  cat -n "$KANBANFILE" | sed 's/^[ ]\+//g;s/\\t/,/g;s/"\/.*\//"/g' | evaluate >> $TMP.index
+}
+
+columnize(){
+  awkformat='{ tag=substr($2,1,4); gsub($2,tag); printf("%-5s",$1); print " #"$2" "$3" "$4" "$5 }'
+  [[ -n $SMALLSCREEN ]] && awkformat='{ print $1" "$3" "$4" "$5 }'
+  i=1; lines="$(cat)"; header="$( echo "$lines" | head -1 )"; output="";
+  rm $TMP.col.* &>/dev/null
+  for status in "${statuses[@]}"; do 
+    [[ -n $SMALLSCREEN ]] && ! [[ "${SMALLSCREEN[@]}" =~ $status ]] && continue
+    label=$status
+    nlines=$(cat $TMP.index | grep "$status" | wc -l) 
+    maxlines=0 
+    [[ -n "maximum_todo[$status]" ]] && maxlines=${maximum_todo[$status]}
+    [[ ${maximum_todo[$status]} > 0 ]] && [[ $nlines > ${maximum_todo[$status]} ]] && label="*$status*"
+    echo -e ".$(strtoline "$label" "~")~~.\n| $label |_______\n|" > $TMP.col.$i
+    cat $TMP.index | grep "$status" | sed 's/["]\?'$status'["]\?//g'       | \
+      printcsv 5   | awk "$awkformat" |  sed 's/^/| /g;s/  / /g'           | unexpand >> $TMP.col.$i
+    i=$((i+1))
+  done 
+  pr -m -t -w$((X-5)) $TMP.col.* | lines 
+  rm $TMP.col.* # print and cleanup
+}
+
+lines(){
+  echo -e "$COL1"
+  if [[ -n $UTF8 ]]; then
+    cat | sed 's/| /│ /g;s/\.~/┌/g;s/~\./──┐/g;s///g;s/~/─/g;s/|\./└/g;s/|/│/g' # nice utf9 lines
+  else 
+    cat | sed 's/~/-/g;s/|+/|/g;'; 
+  fi | colorize 3
+}
+
+colorize(){
+  cat | awk '{ 
+    a = gensub(/#([a-zA-Z0-9_\.-]+) /,"'$COL1'&'$COL0'","g")
+    a = gensub(/\*([a-zA-Z0-9_\.-]+)\*/,"'$COL3'&'$COL0'","g",a)
+    if( NR == '$1' ){ printf "'$COL0'"; }
+    print a
+  }'
+}
+
+align(){
+  cat | awk '{ for(i=3;i<=NF;i++){ $2=$2" "$i } printf "%-5s %s\n", $1,$2 ; }'
+}
+
+show(){
+  [[ -n $1 ]] && { cd $1; echo "[kanban] showing nested kanban '$1'"; $0 show; exit 0; }
+  [[ ! -f "$KANBANFILE" ]] && touch "$KANBANFILE" 
+  create_index
+  if [[ -n $1 ]]; then 
+    statuses=""; for status in $*; do statuses="$status $statuses"; done 
+  fi
+  { 
+    echo "$1"
+    if [[ -n $1 ]]; then cat $TMP.index | grep "$1"; else cat $TMP.index; fi 
+  } | columnize
+  [[ -n $SMALLSCREEN ]] && echo -e "    ${COL1}(${COL0} small terminal detected, hiding certain columns ${COL1})"
+  echo ""
+  ls */.kanban/.kanban.conf 2>/dev/null | awk '{
+    if( !START ){
+      print "kanbans: "
+      START=1
+    }
+    gsub("^./","",$0)
+    gsub("/.kanban.*","",$0)
+    print "   ├─ "$0 
+  }'
+}
+
+get_current_date(){ date "+%Y-%m-%d@%H:%M"; }
+
+update_item_status(){
+  item="$( cat "$KANBANFILE" | awk "{ if (NR==$1) print \$0 }" )"
+  [[ ${#item} == 0 ]] && echo "item $1 not found" && exit 1 
+  if [[ -n "$2" ]]; then  # status change 
+    status="$(echo "$item" | awk -F',' '{ print $1 }' | sed 's/"//g' )"
+    flags="$(echo "$item"  | awk -F',' '{ print $4 }' | sed 's/"//g' )"
+    dates="$(echo "$item"  | awk -F',' '{ print $5 }' | sed 's/"//g' )"
+    newflags="$flags${2:0:1}"
+    newdates="$dates $(get_current_date)"
+    #[[ "$status" =~ "\$(" ]] && { update_item $1; return 0; }
+    [[ "$2" =~ "DONE"   ]] && date="$(get_current_date)"
+    newitem="$item"
+    newitem="${newitem/$status/$2}"
+    newitem="${newitem/$flags/$newflags}"
+    newitem="${newitem/$dates/$newdates}"
+    sed -i '' "s|$item|$newitem|g" "$KANBANFILE" 
+    echo "$status -> $2"
+  fi
+}
+
+update_item(){
+  item="$( cat "$KANBANFILE" | awk "{ if (NR==$1) print \$0 }" )"
+  [[ ${#item} == 0 ]] && echo "item $1 not found" && exit 1 
+  status="$(echo "$item" | awk -F',' '{ print $1 }')"
+  file="$(echo "$item" | awk -F',' '{ print $3 }')"
+  file="${file//\"/}"
+  [[ -d $file/.kanban ]] && { show $file; return; }
+  [[ -f $file ]] && ${EDITOR} "$file"
+  echo '#
+# STATUSES ARE: '${statuses[*]}' 
+#
+'"$item" > $TMP.update
+  ${EDITOR} $TMP.update
+  sed -i '' "s|$item|$(cat $TMP.update | tail -n1)|g" "$KANBANFILE" 
+  echo "updated item $1"
+}
+
+printcsv(){
+  csv="$HEADER$(cat)"
+  [[ ! -n $1 ]] && max=999999 || max=$1
+  [[ ! -n $2 ]] && min=1 || min=$1
+  echo -e "$csv" | sed 's/,"",/," ",/g' | gawk -vFS='^"|","|"$|",|,"|,'            \
+    '{out=""; for(i='$min';i<NF+1&&i<max;i++) out=out"\t"$i; print out }'      \
+    max=$max | sed 's/""/"/g' | column -t -s $'\t'                   
+}
+
+csv(){
+  ${EDITOR} $KANBANFILE
+}
+
+# source config
+[[ ! -f ~/$FILE_CONF ]] && { createconfig; }
+[[   -f $FILE_CONF     ]] && source $FILE_CONF 
+[[ ! -f $FILE_CONF     ]] && source ~/$FILE_CONF 
+
+if [[ ! -n "$KANBANFILE" ]]; then 
+  [[ -f "$FILE_CSV" ]] && KANBANFILE="$(pwd)/$FILE_CSV"
+  [[ ! -f "$KANBANFILE" ]] && KANBANFILE=~/"$FILE_CSV"
+fi
+[[ ! -f "$KANBANFILE" ]] && { echo "$KANBANFILE does not exist"; exit; }
+
+
+# execute main
+_init
+
+if [[ -n "$1" ]]; then 
+
+  [[ "${statuses[*]}" =~ "$1" ]] && { list "$@" ; exit 0; }
+  case "$1" in 
+
+    [0-9]*)  [[ -n $2 ]] && {
+                update_item_status "$@"
+                    [[ ! "${statuses[*]}" =~ "$2" ]] && echo -e "[!] burying in csv (visible statuses are: ${statuses[*]})"
+                exit 0
+             }
+             update_item "$@"
+             ;;
+
+    *)       "$@" 
+             ;;
+  esac
+else grep -A40 "^# Usage:" "$0" | sed 's/^# //g' | more ; fi
