@@ -117,4 +117,7 @@ elif [ "$1" = "apply_config" ]; then
     exit 1
   fi
   create_hard_links_from_config
+elif [ "$1" = "-h" ]; then
+  echo "Options are: update_config, apply_config"
+  exit 1
 fi
