@@ -1,0 +1,11 @@
+#!/bin/bash
+notify-send "hypr socket2 listener active!"
+function handle {
+  if [[ $1 == "createworkspace>>special:slack" ]]; then
+    notify-send "sending socket emission $1 to slack_start.sh"
+    ~/.local/bin/slack_start.sh
+  else
+    echo $1 >> ~/test_out_files/hyprland_sock.txt
+  fi
+}
+socat - "UNIX-CONNECT:$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock" | while read -r line; do handle "$line"; done

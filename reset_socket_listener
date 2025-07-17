@@ -1,0 +1,12 @@
+#!/bin/bash
+processes=("slack_start.sh" "socat" "slack")
+for p in "${processes[@]}"; do
+  p_running=$(ps -a | rg "$p")
+  if [[ -z $p_running ]]; then
+    echo "$p not running"
+  else
+    echo "killing $p"
+    killall $p
+    sleep 1
+  fi
+done;
